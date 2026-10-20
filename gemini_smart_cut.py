@@ -15,7 +15,7 @@ import json
 import shutil
 
 # ============== CẤU HÌNH ==============
-   TARGET_DIR = r"E:\EDIT VIDEO AS Skill - Ban Nang Cap"
+TARGET_DIR = r"E:\EDIT VIDEO AS Skill - Ban Nang Cap"
 VIDEO_EXT = (".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v")
 TARGET_FPS = 30
 CRF = 18
