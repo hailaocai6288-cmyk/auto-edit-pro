@@ -1,148 +1,97 @@
 # -*- coding: utf-8 -*-
+"""AUTO EDIT PRO V7.5 - giao diện web (Streamlit). Chạy trên Chrome / mọi trình duyệt."""
 import os
-import subprocess
-import sys
 import tempfile
-import json
-import shutil
+
 import streamlit as st
+
+import autoedit_core as core
 
 st.set_page_config(page_title="Auto Edit Pro V7.5", page_icon="🎬", layout="centered")
 
 st.title("🎬 AUTO EDIT PRO V7.5")
-st.caption("Tự động ghép clip ngắn → Video 1080p + Phụ đề tự động (Whisper)")
+st.caption("Tự động ghép clip ngắn → video 1080p + phụ đề tự động (Whisper)")
 
-# Sidebar cấu hình
+problems = core.check_tools()
+if problems:
+    st.error("Thiếu FFmpeg: " + " ".join(problems))
+    st.info("Trên Streamlit Cloud: file `packages.txt` phải chứa dòng `ffmpeg`. "
+            "Trên máy: cài FFmpeg bản full và thêm vào PATH.")
+    st.stop()
+
+# ---------- Sidebar ----------
 st.sidebar.header("⚙️ Cấu hình Video")
 target_fps = st.sidebar.number_input("FPS", value=30, min_value=15, max_value=60)
-crf = st.sidebar.slider("Chất lượng CRF (Càng nhỏ càng nét)", 15, 28, 18)
+crf = st.sidebar.slider("Chất lượng CRF (càng nhỏ càng nét)", 15, 28, 18)
+fade = st.sidebar.slider("Fade vào/ra mỗi clip (giây)", 0.0, 1.0, 0.4, 0.1)
+sort_names = st.sidebar.checkbox("Sắp xếp clip theo tên file", value=True,
+                                 help="Bỏ chọn để giữ đúng thứ tự tải lên.")
 enable_sub = st.sidebar.checkbox("Tự động tạo phụ đề", value=True)
-whisper_model = st.sidebar.selectbox("Model Whisper", ["tiny", "base", "small", "medium"], index=2)
-
-uploaded_files = st.file_uploader(
-    "Tải các clip ngắn lên đây (.mp4, .mov, .mkv)", 
-    type=["mp4", "mov", "mkv", "avi", "webm"], 
-    accept_multiple_files=True
+whisper_model = st.sidebar.selectbox(
+    "Model Whisper", ["tiny", "base", "small", "medium"], index=1,
+    help="Trên Streamlit Cloud (RAM thấp) nên dùng tiny/base. Chạy máy cá nhân có thể dùng small/medium.",
 )
 
-def run_cmd(cmd):
-    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
+uploaded = st.file_uploader(
+    "Tải các clip ngắn lên đây (.mp4, .mov, .mkv, .avi, .webm, .m4v)",
+    type=[e.lstrip(".") for e in core.VIDEO_EXT],
+    accept_multiple_files=True,
+)
 
-def probe_video(path):
-    r = run_cmd([
-        "ffprobe", "-v", "error",
-        "-show_entries", "stream=codec_type,width,height,duration:format=duration",
-        "-of", "json", path
-    ])
-    try:
-        d = json.loads(r.stdout or "{}")
-        streams = d.get("streams", [])
-        v = next((s for s in streams if s.get("codec_type") == "video"), {})
-        has_a = any(s.get("codec_type") == "audio" for s in streams)
-        w = int(v.get("width") or 0)
-        h = int(v.get("height") or 0)
-        dur = float(v.get("duration") or d.get("format", {}).get("duration") or 0)
-        return {"w": w, "h": h, "duration": dur, "has_audio": has_a}
-    except Exception:
-        return {"w": 720, "h": 1280, "duration": 0.0, "has_audio": True}
+if uploaded:
+    files = sorted(uploaded, key=lambda f: core.natural_key(f.name)) if sort_names else list(uploaded)
+    st.write("**Thứ tự ghép:** " + " → ".join(f.name for f in files))
 
-def generate_srt(video_path, srt_path, model_name):
-    try:
-        import whisper
-        model = whisper.load_model(model_name)
-        result = model.transcribe(video_path, task="transcribe", language=None, verbose=False)
-        segments = result.get("segments", [])
-        if not segments:
-            return False
-        with open(srt_path, "w", encoding="utf-8") as f:
-            for i, seg in enumerate(segments, start=1):
-                s, e, text = seg["start"], seg["end"], seg["text"].strip()
-                if not text: continue
-                fmt = lambda sec: f"{int(sec//3600):02d}:{int((sec%3600)//60):02d}:{int(sec%60):02d},{int(round((sec-int(sec))*1000)):03d}"
-                f.write(f"{i}\n{fmt(s)} --> {fmt(e)}\n{text}\n\n")
-        return True
-    except Exception as ex:
-        st.error(f"Lỗi Whisper: {ex}")
-        return False
+    if st.button("🚀 Bắt đầu Biên Tập & Ghép Video", type="primary"):
+        st.session_state.pop("result", None)
+        log_box = st.empty()
+        bar = st.progress(0.0)
+        lines = []
 
-def burn_sub(video_path, srt_path, output_path):
-    sub_style = "FontName=Arial,FontSize=22,PrimaryColour=&H00FFFF&,OutlineColour=&H000000&,Outline=2,Alignment=2,MarginV=40"
-    escaped = srt_path.replace("\\", "/").replace(":", "\\:")
-    cmd = [
-        "ffmpeg", "-y", "-i", video_path,
-        "-vf", f"subtitles='{escaped}':force_style='{sub_style}'",
-        "-c:v", "libx264", "-crf", str(crf), "-preset", "medium",
-        "-c:a", "copy", output_path
-    ]
-    res = run_cmd(cmd)
-    return res.returncode == 0 and os.path.exists(output_path)
+        def log(msg):
+            lines.append(str(msg))
+            log_box.code("\n".join(lines[-12:]), language=None)
 
-if uploaded_files and st.button("🚀 Bắt đầu Biên Tập & Ghép Video", type="primary"):
-    with st.spinner("Đang xử lý video... Vui lòng đợi trong giây lát."):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            input_paths = []
-            for idx, uploaded_file in enumerate(uploaded_files):
-                path = os.path.join(temp_dir, f"in_{idx}_{uploaded_file.name}")
-                with open(path, "wb") as f:
-                    f.write(uploaded_file.getbuffer())
-                input_paths.append(path)
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = []
+            for i, f in enumerate(files):
+                safe = f"in_{i:03d}{os.path.splitext(f.name)[1].lower()}"
+                p = os.path.join(tmp, safe)
+                with open(p, "wb") as out:
+                    out.write(f.getbuffer())
+                paths.append(p)
 
-            st.info(f"Đã tải lên {len(input_paths)} video. Bắt đầu xử lý...")
-            
-            # Kiểm tra kích thước video đầu tiên
-            info0 = probe_video(input_paths[0])
-            is_vert = (info0["h"] or 1280) >= (info0["w"] or 720)
-            target_W, target_H = (1080, 1920) if is_vert else (1920, 1080)
+            out_path = os.path.join(tmp, "final.mp4")
+            srt_path = os.path.join(tmp, "final.srt")
+            res = core.render(
+                paths, out_path, fps=int(target_fps), crf=int(crf), fade=float(fade),
+                enable_sub=enable_sub, whisper_model=whisper_model,
+                log=log, srt_path=srt_path, progress=bar.progress,
+            )
+            if res["ok"]:
+                with open(out_path, "rb") as fh:
+                    video_bytes = fh.read()
+                srt_bytes = None
+                if res["srt_path"] and os.path.exists(res["srt_path"]):
+                    with open(res["srt_path"], "rb") as fh:
+                        srt_bytes = fh.read()
+                st.session_state["result"] = {
+                    "video": video_bytes, "srt": srt_bytes,
+                    "sub": res["sub_applied"], "info": res["info"],
+                }
+            else:
+                st.error(f"❌ {res['error']}")
 
-            # Process clips
-            proc_paths = []
-            for i, p in enumerate(input_paths):
-                info = probe_video(p)
-                dur = info["duration"] or 10.0
-                out_clip = os.path.join(temp_dir, f"proc_{i:02d}.mp4")
-                vf = f"fps={target_fps},scale={target_W}:{target_H}:force_original_aspect_ratio=decrease,pad={target_W}:{target_H}:(ow-iw)/2:(oh-ih)/2:black,eq=contrast=1.06:saturation=1.08:brightness=0.01,unsharp=3:3:0.4:3:3:0.0,format=yuv420p"
-                
-                cmd = ["ffmpeg", "-y", "-i", p, "-vf", vf, "-c:v", "libx264", "-crf", str(crf), "-preset", "medium"]
-                if info["has_audio"]:
-                    cmd += ["-af", "aresample=44100,aformat=channel_layouts=stereo", "-c:a", "aac", "-b:a", "192k", "-map", "0:v:0", "-map", "0:a:0"]
-                else:
-                    cmd += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100", "-c:a", "aac", "-b:a", "192k", "-map", "0:v:0", "-map", "1:a:0"]
-                cmd += ["-shortest", out_clip]
-                
-                run_cmd(cmd)
-                if os.path.exists(out_clip):
-                    proc_paths.append(out_clip)
-
-            # Concat
-            concat_list = os.path.join(temp_dir, "list.txt")
-            with open(concat_list, "w", encoding="utf-8") as f:
-                for p in proc_paths:
-                    f.write(f"file '{p.replace(chr(92), '/')}'\n")
-
-            temp_merged = os.path.join(temp_dir, "merged.mp4")
-            run_cmd(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list, "-c", "copy", temp_merged])
-
-            final_out = os.path.join(temp_dir, "final.mp4")
-            srt_out = os.path.join(temp_dir, "sub.srt")
-
-            # Auto sub
-            sub_ok = False
-            if enable_sub:
-                st.text("Đang nhận diện giọng nói và tạo phụ đề...")
-                if generate_srt(temp_merged, srt_out, whisper_model):
-                    if burn_sub(temp_merged, srt_out, final_out):
-                        sub_ok = True
-
-            if not sub_ok and os.path.exists(temp_merged):
-                shutil.copy(temp_merged, final_out)
-
-            if os.path.exists(final_out):
-                st.success("🎉 Xuất video thành công!")
-                st.video(final_out)
-                with open(final_out, "rb") as file:
-                    st.download_button(
-                        label="📥 Tải Video Hoàn Chỉnh Về Máy",
-                        data=file,
-                        file_name="auto_edit_pro_output.mp4",
-                        mime="video/mp4"
-                    )
+# Kết quả lưu trong session_state -> bấm nút tải về không làm mất video
+result = st.session_state.get("result")
+if result:
+    st.success("🎉 Xuất video thành công!" + ("" if result["sub"] else " (không có phụ đề)"))
+    info = result["info"]
+    st.caption(f"{info['w']}x{info['h']} • {info['duration']:.1f}s • "
+               f"{'có' if info['has_audio'] else 'không có'} âm thanh")
+    st.video(result["video"])
+    st.download_button("📥 Tải video hoàn chỉnh", data=result["video"],
+                       file_name="auto_edit_pro_output.mp4", mime="video/mp4")
+    if result["srt"]:
+        st.download_button("📄 Tải file phụ đề (.srt)", data=result["srt"],
+                           file_name="auto_edit_pro_output.srt", mime="text/plain")

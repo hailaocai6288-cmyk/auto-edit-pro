@@ -1,1 +1,2 @@
-Ffmpeg
+ffmpeg
+fonts-liberation

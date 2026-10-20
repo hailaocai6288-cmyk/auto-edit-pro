@@ -1,2 +1,2 @@
-streamlit
-openai-whisper
+streamlit>=1.35
+faster-whisper>=1.0.0
