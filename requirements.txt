@@ -1,2 +1,7 @@
-streamlit>=1.35
-faster-whisper>=1.0.0
+streamlit
+openai-whisper
+torch
+torchaudio
+ffmpeg-python
+soundfile<=0.12.1
+more-itertools
