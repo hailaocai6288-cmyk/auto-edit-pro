@@ -1,2 +1,5 @@
 ffmpeg
+fonts-dejavu
+fonts-noto
 fonts-liberation
+
