@@ -1,0 +1,54 @@
+# Video & media (không commit file nặng)
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+*.m4v
+*.srt
+*.ass
+*.wav
+*.mp3
+*.aac
+
+# Output & temp của script
+output_*.mp4
+temp_*.mp4
+*_v7*.mp4
+v7_sub.srt
+sub_temp.srt
+proc_*.mp4
+concat_list.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# Whisper model cache (rất nặng)
+*.pt
+*.pth
+~/.cache/whisper/
+.cache/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
