@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 AUTO EDIT PRO V7.5 - lõi xử lý dùng chung cho:
-  - app.py              (giao diện web Streamlit, chạy trên Chrome)
-  - gemini_smart_cut.py (chạy dòng lệnh / run.bat trên Windows)
-
+app.py              (giao diện web Streamlit, chạy trên Chrome)
+gemini_smart_cut.py (chạy dòng lệnh / run.bat trên Windows)
 Quy trình: chuẩn hóa từng clip (1080p + chỉnh màu + fade) -> ghép -> Whisper tạo phụ đề -> burn phụ đề.
 """
 import json
@@ -13,17 +12,35 @@ import shutil
 import subprocess
 import tempfile
 
+# =============================================================================
+# WA LỖI soundfile.open() không nhận tham số 'metadata_err'
+# (faster-whisper bản mới truyền tham số này, nhưng soundfile<=0.12.1 chưa có)
+# =============================================================================
+try:
+    import soundfile as _sf
+
+    _sf_open_orig = _sf.open
+
+    def _sf_open_patched(path, *args, **kwargs):
+        kwargs.pop("metadata_err", None)   # bỏ tham số không tương thích
+        return _sf_open_orig(path, *args, **kwargs)
+
+    _sf.open = _sf_open_patched
+except Exception:
+    pass
+# =============================================================================
+
 VIDEO_EXT = (".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v")
 
 # Phụ đề: màu vàng, viền đen. Muốn chữ nhỏ hơn thì giảm SUB_FONT_SIZE (mặc định V7.5 = 22).
 SUB_FONT_SIZE = 22
 SUB_STYLE = (
-    f"FontName=Arial,FontSize={SUB_FONT_SIZE},"
-    "PrimaryColour=&H00FFFF&,"
-    "OutlineColour=&H000000&,"
-    "BackColour=&H80000000&,"
-    "Outline=2,Shadow=1,BorderStyle=1,"
-    "Alignment=2,MarginV=40"
+    f"FontName=Arial,FontSize={SUB_FONT_SIZE}, "
+    "PrimaryColour=&H00FFFF&, "
+    "OutlineColour=&H000000&, "
+    "BackColour=&H80000000&, "
+    "Outline=2,Shadow=1,BorderStyle=1, "
+    "Alignment=2,MarginV=40 "
 )
 
 _MODEL_CACHE = {}
@@ -41,7 +58,8 @@ def run(cmd, timeout=None, cwd=None):
             encoding="utf-8", errors="ignore", timeout=timeout, cwd=cwd,
         )
     except FileNotFoundError:
-        return subprocess.CompletedProcess(cmd, returncode=127, stdout="", stderr=f"Không tìm thấy lệnh: {cmd[0]}")
+        return subprocess.CompletedProcess(cmd, returncode=127, stdout="",
+                                           stderr=f"Không tìm thấy lệnh: {cmd[0]}")
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="Timeout")
 
@@ -90,14 +108,13 @@ def build_vf(W, H, duration, fps, fade, do_scale=True):
         parts.append(f"fade=t=in:st=0:d={fade}")
         parts.append(f"fade=t=out:st={max(0, duration - fade):.3f}:d={fade}")
     parts.append("format=yuv420p")
-    return ",".join(parts)
+    return ", ".join(parts)
 
 
 def process_clip(src, info, idx, W, H, workdir, fps, crf, fade, log):
     out_clip = os.path.join(workdir, f"proc_{idx:03d}.mp4")
     duration = info["duration"] or 10.0
     attempts = [(True, W, H, f"{W}x{H}"), (False, 0, 0, "giữ độ phân giải gốc")]
-
     for do_scale, w, h, label in attempts:
         vf = build_vf(w, h, duration, fps, fade, do_scale)
         if info["has_audio"]:
@@ -112,7 +129,6 @@ def process_clip(src, info, idx, W, H, workdir, fps, crf, fade, log):
             ]
         else:
             # Clip không có tiếng -> thêm âm thanh im lặng để ghép không bị lệch.
-            # (Cả 2 input phải đứng TRƯỚC các tùy chọn đầu ra.)
             cmd = [
                 "ffmpeg", "-y", "-i", src,
                 "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
@@ -151,7 +167,10 @@ def fmt_srt_time(sec):
 
 
 def transcribe(video_path, model_name, log):
-    """Nhận diện giọng nói -> [(start, end, text)]. Ưu tiên faster-whisper (nhẹ), dự phòng openai-whisper."""
+    """Nhận diện giọng nói -> [(start, end, text)].
+    Ưu tiên faster-whisper (nhẹ), dự phòng openai-whisper."""
+
+    # --- faster-whisper ---
     try:
         from faster_whisper import WhisperModel
     except ImportError:
@@ -161,22 +180,34 @@ def transcribe(video_path, model_name, log):
         key = ("fw", model_name)
         if key not in _MODEL_CACHE:
             log(f"[Auto Sub] Đang tải model Whisper '{model_name}' (lần đầu hơi lâu)...")
-            _MODEL_CACHE[key] = WhisperModel(model_name, device="cpu", compute_type="int8")
-        log("[Auto Sub] Đang nhận diện giọng nói...")
-        segs, info = _MODEL_CACHE[key].transcribe(video_path, task="transcribe", vad_filter=True)
-        out = [(s.start, s.end, s.text.strip()) for s in segs if s.text.strip()]
-        log(f"[Auto Sub] Ngôn ngữ: {info.language.upper()} | Số đoạn: {len(out)}")
-        return out
+            try:
+                _MODEL_CACHE[key] = WhisperModel(model_name, device="cpu", compute_type="int8")
+            except Exception as ex:
+                log(f"[Auto Sub] faster-whisper lỗi khi tải model: {ex} -> chuyển sang openai-whisper.")
+                WhisperModel = None
 
+        if WhisperModel is not None:
+            try:
+                log("[Auto Sub] Đang nhận diện giọng nói (faster-whisper)...")
+                segs, info = _MODEL_CACHE[key].transcribe(video_path, task="transcribe", vad_filter=True)
+                out = [(s.start, s.end, s.text.strip()) for s in segs if s.text.strip()]
+                log(f"[Auto Sub] Ngôn ngữ: {info.language.upper()} | Số đoạn: {len(out)}")
+                return out
+            except Exception as ex:
+                log(f"[Auto Sub] faster-whisper lỗi khi transcribe: {ex} -> thử openai-whisper.")
+
+    # --- openai-whisper (dự phòng) ---
     try:
         import whisper
     except ImportError:
-        raise RuntimeError("Chưa cài thư viện phụ đề. Chạy: python -m pip install faster-whisper")
+        raise RuntimeError("Chưa cài thư viện phụ đề. Chạy: python -m pip install faster-whisper openai-whisper")
+
     key = ("ow", model_name)
     if key not in _MODEL_CACHE:
-        log(f"[Auto Sub] Đang tải model Whisper '{model_name}'...")
+        log(f"[Auto Sub] Đang tải model Whisper '{model_name}' (openai-whisper)...")
         _MODEL_CACHE[key] = whisper.load_model(model_name)
-    log("[Auto Sub] Đang nhận diện giọng nói...")
+
+    log("[Auto Sub] Đang nhận diện giọng nói (openai-whisper)...")
     res = _MODEL_CACHE[key].transcribe(video_path, task="transcribe", language=None, verbose=False, fp16=False)
     out = [(s["start"], s["end"], s["text"].strip()) for s in res.get("segments", []) if s["text"].strip()]
     log(f"[Auto Sub] Ngôn ngữ: {str(res.get('language', '?')).upper()} | Số đoạn: {len(out)}")
@@ -213,7 +244,7 @@ def render(clip_paths, output_path, fps=30, crf=18, fade=0.4, enable_sub=True,
            whisper_model="small", log=print, srt_path=None, progress=None):
     """
     Ghép các clip -> output_path. Trả về dict:
-      ok, sub_applied, srt_path, info (độ dài/độ phân giải), error
+    ok, sub_applied, srt_path, info (độ dài/độ phân giải), error
     """
     def step(frac):
         if progress:
@@ -225,6 +256,7 @@ def render(clip_paths, output_path, fps=30, crf=18, fade=0.4, enable_sub=True,
     if problems:
         result["error"] = " ".join(problems)
         return result
+
     if not clip_paths:
         result["error"] = "Không có clip nào để xử lý."
         return result
@@ -257,6 +289,7 @@ def render(clip_paths, output_path, fps=30, crf=18, fade=0.4, enable_sub=True,
         if res.returncode != 0 or not os.path.exists(merged):
             result["error"] = f"Lỗi ghép nối: {(res.stderr or '')[-300:]}"
             return result
+
         step(0.65)
 
         sub_ok = False
